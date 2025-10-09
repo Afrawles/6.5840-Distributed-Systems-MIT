@@ -36,6 +36,7 @@ type TaskResponse struct {
 	TaskID string
 	File string
 	NReduce int
+	NMap int
 	ReduceIndex int
 }
 
