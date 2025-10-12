@@ -40,13 +40,28 @@ func (lk *Lock) Acquire() {
 
 		switch err {
 		case rpc.ErrNoKey:
-			if lk.ck.Put(lk.key, lk.clientId, 0) == rpc.OK {
+			replyErr := lk.ck.Put(lk.key, lk.clientId, 0) 
+			if replyErr == rpc.OK {
 				return
+			}
+			if replyErr == rpc.ErrMaybe {
+				val, _, err := lk.ck.Get(lk.key)
+				if err == rpc.OK && val == lk.clientId {
+					return
+				}
 			}
 		case rpc.OK:
 			if val == "" {
-				if lk.ck.Put(lk.key, lk.clientId, ver) == rpc.OK {
+				replyErr := lk.ck.Put(lk.key, lk.clientId, ver) 
+				if replyErr == rpc.OK {
 					return
+				}
+
+				if replyErr == rpc.ErrMaybe {
+					val, _, err := lk.ck.Get(lk.key)
+					if err == rpc.OK && val == lk.clientId {
+						return
+					}
 				}
 			}
 		}
@@ -57,9 +72,29 @@ func (lk *Lock) Acquire() {
 
 func (lk *Lock) Release() {
 	// Your code here
-	val, ver, err := lk.ck.Get(lk.key)
-	if err == rpc.OK && val == lk.clientId {
-		lk.ck.Put(lk.key, "", ver)
+	for {
+		val, ver, err := lk.ck.Get(lk.key)
+		if err == rpc.OK && val == lk.clientId {
+			replyErr := lk.ck.Put(lk.key, "", ver)
+			if replyErr == rpc.OK {
+				return
+			}
+			if replyErr == rpc.ErrMaybe {
+				val, _, err := lk.ck.Get(lk.key)
+				if err == rpc.OK && val == "" {
+					return
+				}
+				if err == rpc.OK && val != lk.clientId {
+					return
+				}
+			}
+			if replyErr == rpc.ErrVersion {
+				return
+			}
+		} else {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 }
