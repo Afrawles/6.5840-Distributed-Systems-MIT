@@ -1,6 +1,8 @@
 package kvsrv
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
@@ -34,9 +36,14 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
 
-	ok := ck.clnt.Call( ck.server, "KVServer.Get", &args, &reply)
-	if !ok {
-		return "", 0, rpc.ErrNoKey
+	for {
+		ok := ck.clnt.Call( ck.server, "KVServer.Get", &args, &reply)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)
+			continue
+			// return "", 0, rpc.ErrNoKey
+		}
+		break
 	}
 
 	return reply.Value, reply.Version, reply.Err 
@@ -64,15 +71,19 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	args := rpc.PutArgs{Key: key, Version: version, Value: value}
 	reply := rpc.PutReply{}
 	
-	ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
-	if !ok {
-		return rpc.ErrMaybe
+	retried := false
+	for {
+		reply = rpc.PutReply{}
+		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)
+			retried = true
+			continue
+		}
+		break
 	}
 
-	if (reply.Err == rpc.ErrVersion) {
-		if version == 0 {
-			return rpc.ErrVersion
-		}
+	if reply.Err == rpc.ErrVersion && retried {
 		return rpc.ErrMaybe
 	}
 
