@@ -163,6 +163,26 @@ type AppendEntriesArgs struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.term < rf.currentTerm {
+		reply.term = rf.currentTerm
+		reply.voteGranted = false
+		return
+	}
+
+	if (rf.votedFor == -1 || rf.votedFor == args.candidateID) && args.term == rf.currentTerm {
+		reply.voteGranted = true
+	} else {
+		reply.voteGranted = false
+	}
+	rf.votedFor = args.candidateID
+	rf.currentTerm = args.term
+
+	// TODO: implement reset timer
+
 }
 
 // example code to send a RequestVote RPC to a server.
