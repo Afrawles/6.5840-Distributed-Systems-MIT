@@ -51,7 +51,7 @@ type Raft struct {
 	//Volatile state on leaders
 	nextIndex map[int]int
 	matchIndex map[int]int
-	prevElectionTime time.Time
+	electionTimer time.Time
 
 	state int
 
@@ -147,8 +147,8 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
-	term int
-	voteGranted bool
+	Term int
+	VoteGranted bool
 }
 
 type AppendEntriesArgs struct {
@@ -158,6 +158,19 @@ type AppendEntriesArgs struct {
  type AppendEntriesReply struct {
 	term int
 	success bool
+}
+
+// lastLogTermAndIndex helps get last log term and idnex 
+func (rf *Raft) lastLogTermAndIndex() (int, int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if len(rf.log) < 0 {
+		return -1, -1 
+	}
+
+	index := len(rf.log)-1
+	return rf.log[index].term, index 
+
 }
 
 // example RequestVote RPC handler.
@@ -173,16 +186,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if (rf.votedFor == -1 || rf.votedFor == args.candidateID) && args.term == rf.currentTerm {
+	lastLogTerm, lastLogIndex := rf.lastLogTermAndIndex()
+	if (rf.votedFor == -1 || rf.votedFor == args.candidateID) && (args.lastLogTerm > lastLogTerm || (args.lastLogTerm == lastLogTerm && args.lastLogIndex >= lastLogIndex)) {
 		reply.voteGranted = true
+		rf.votedFor = args.candidateID
+		rf.electionTimer = time.Now()
 	} else {
 		reply.voteGranted = false
 	}
-	rf.votedFor = args.candidateID
 	rf.currentTerm = args.term
-
-	// TODO: implement reset timer
-
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -266,19 +278,21 @@ func (rf *Raft) electionTimeout() time.Duration {
 }
 
 func (rf *Raft) ticker() {
-	timeoutDuration := rf.electionTimeout()
-	for rf.killed() == false {
+	for !rf.killed(){
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
-		if term, isleader := rf.GetState(); term != rf.currentTerm || isleader {
-			return
-		}
+		rf.mu.Lock()
+		state := rf.state
+		lastEelection := rf.electionTimer
+		rf.mu.Unlock()
 
-		if elapsed := time.Since(rf.prevElectionTime); elapsed >= timeoutDuration {
-			//TODO: start election
-			return
+		if time.Since(lastEelection) >= rf.electionTimeout() && state == FOLLOWER {
+			rf.mu.Lock()
+			rf.startElection()
+			rf.mu.Unlock()
+
 		}
 
 		// pause for a random amount of time between 50 and 350
@@ -286,6 +300,58 @@ func (rf *Raft) ticker() {
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
+}
+
+func (rf *Raft) startElection() {
+	rf.state = CANDIDATE
+	rf.currentTerm++
+	rf.votedFor =  rf.me
+	rf.electionTimer = time.Now()
+	currentTerm := rf.currentTerm
+
+	votes := 1
+
+	for i, _ := range rf.peers {
+		go func ()  {
+			lastLogTerm, lastLogIdx := rf.lastLogTermAndIndex()
+
+			args := RequestVoteArgs{
+				term: currentTerm,
+				candidateID: rf.me,
+				lastLogTerm: lastLogTerm,
+				lastLogIndex: lastLogIdx,
+			}
+
+			var reply RequestVoteReply
+
+			if ok := rf.sendRequestVote(i, &args, &reply); !ok {
+				return
+			}
+
+			rf.mu.Lock()
+			if reply.Term > currentTerm {
+				// become FOLLOWER
+				rf.state = FOLLOWER
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1 
+				rf.electionTimer = time.Now()
+				go rf.ticker()
+			} else if reply.Term == currentTerm {
+				if reply.VoteGranted {
+					votes++
+					if votes * 2 > len(rf.peers) + 1 {
+						rf.leader()
+					}
+				}
+			}
+			rf.mu.Unlock()
+
+		}()
+	}
+}
+
+func (rf *Raft) leader(){
+
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -314,7 +380,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.matchIndex = make(map[int]int)
 	rf.nextIndex = make(map[int]int)
-	rf.prevElectionTime = time.Now()
+	rf.electionTimer = time.Now()
 
 
 	// initialize from state persisted before a crash
