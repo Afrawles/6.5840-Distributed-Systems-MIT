@@ -58,7 +58,7 @@ type Raft struct {
 }
 
 type LogEntry struct {
-	term int
+	Term int
 	command any
 }
 
@@ -67,13 +67,13 @@ type LogEntry struct {
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	var term int
+	var Term int
 	var isleader bool
 	// Your code here (3A).
 	
-	term = rf.currentTerm
+	Term = rf.currentTerm
 	isleader = rf.state == LEADER
-	return term, isleader
+	return Term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -137,10 +137,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
-	term int
-	candidateID int
-	lastLogIndex int
-	lastLogTerm int
+	Term int
+	CandidateID int
+	LastLogIndex int
+	LastLogTerm int
 }
 
 // example RequestVote RPC reply structure.
@@ -152,16 +152,20 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	term int
+	Term int
 	leaderID int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []LogEntry
+	LeaderCommit int
 }
  type AppendEntriesReply struct {
-	term int
+	Term int
 	success bool
 }
 
-// lastLogTermAndIndex helps get last log term and idnex 
-func (rf *Raft) lastLogTermAndIndex() (int, int) {
+// LastLogTermAndIndex helps get last log Term and idnex 
+func (rf *Raft) LastLogTermAndIndex() (int, int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if len(rf.log) < 0 {
@@ -169,7 +173,7 @@ func (rf *Raft) lastLogTermAndIndex() (int, int) {
 	}
 
 	index := len(rf.log)-1
-	return rf.log[index].term, index 
+	return rf.log[index].Term, index 
 
 }
 
@@ -180,21 +184,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.term < rf.currentTerm {
-		reply.term = rf.currentTerm
-		reply.voteGranted = false
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
 		return
 	}
 
-	lastLogTerm, lastLogIndex := rf.lastLogTermAndIndex()
-	if (rf.votedFor == -1 || rf.votedFor == args.candidateID) && (args.lastLogTerm > lastLogTerm || (args.lastLogTerm == lastLogTerm && args.lastLogIndex >= lastLogIndex)) {
-		reply.voteGranted = true
-		rf.votedFor = args.candidateID
+	LastLogTerm, LastLogIndex := rf.LastLogTermAndIndex()
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && (args.LastLogTerm > LastLogTerm || (args.LastLogTerm == LastLogTerm && args.LastLogIndex >= LastLogIndex)) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateID
 		rf.electionTimer = time.Now()
 	} else {
-		reply.voteGranted = false
+		reply.VoteGranted = false
 	}
-	rf.currentTerm = args.term
+	rf.currentTerm = args.Term
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -240,17 +244,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
-	term := -1
+	Term := -1
 	isLeader := true
 
 	// Your code here (3B).
 
 
-	return index, term, isLeader
+	return index, Term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -313,13 +317,13 @@ func (rf *Raft) startElection() {
 
 	for i, _ := range rf.peers {
 		go func ()  {
-			lastLogTerm, lastLogIdx := rf.lastLogTermAndIndex()
+			LastLogTerm, lastLogIdx := rf.LastLogTermAndIndex()
 
 			args := RequestVoteArgs{
-				term: currentTerm,
-				candidateID: rf.me,
-				lastLogTerm: lastLogTerm,
-				lastLogIndex: lastLogIdx,
+				Term: currentTerm,
+				CandidateID: rf.me,
+				LastLogTerm: LastLogTerm,
+				LastLogIndex: lastLogIdx,
 			}
 
 			var reply RequestVoteReply
@@ -374,7 +378,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 3A
 	rf.state = FOLLOWER
 	rf.log = []LogEntry{}
-	rf.log = append(rf.log, LogEntry{term: 0, command: nil})
+	rf.log = append(rf.log, LogEntry{Term: 0, command: nil})
 	rf.votedFor = -1
 	rf.lastApplied = 0
 	rf.commitIndex = 0
