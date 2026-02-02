@@ -9,6 +9,7 @@ package raft
 import (
 	//	"bytes"
 	"math/rand"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -252,14 +253,34 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(Command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
 	index := -1
-	Term := -1
-	isLeader := true
+	term := -1
+	isLeader := false 
 
 	// Your code here (3B).
+	if rf.State != LEADER {
+		return index, term, isLeader
+	}
+
+	newEntry := LogEntry{
+		Term: rf.currentTerm,
+		Command: Command,
+	}
+
+	index = len(rf.log)
+	term = rf.currentTerm
+	isLeader = true
+
+	rf.log = append(rf.log, newEntry)
+
+	rf.matchIndex[rf.me] = index
+	rf.nextIndex[rf.me] = index + 1
 
 
-	return index, Term, isLeader
+	return index, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -369,6 +390,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// NOTE: 1. Reply false if term<currentTerm(§5.1)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -384,7 +406,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimer = time.Now()
 
 	reply.Term = rf.currentTerm
+	if args.PrevLogIndex >= len(rf.log) {
+		return
+	}
+
+	// NOTE: 2. Reply false if log doesn’t
+	// contain an entry at prevLogIndex whose term 
+	// matches prevLogTerm(§5.3)
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.Term {
+		return
+	}
+	
+	// NOTE: 3. If an existing entry conflicts with a new one
+	// (same index but different terms),
+	// delete the existing entry and all that follow it(§5.3)
+	logIndex := args.PrevLogIndex + 1
+	for i, entry := range args.Entries {
+		if logIndex + i < len(rf.log) {
+			if rf.log[logIndex + i].Term != entry.Term {
+				rf.log = rf.log[:logIndex+1]
+				rf.log = append(rf.log, args.Entries[i:]...)
+				break
+			} else {
+				// NOTE: 4. Append any new entries not already in the log
+				rf.log = append(rf.log, args.Entries[i:]...)
+				break
+			}
+
+		}
+	}
+
+	// NOTE: 5. If leader Commit > commit Index, 
+	// set commit Index = min(leader Commit,index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1) 
+	}
+
 	reply.Success = true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+
+	return  b
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -444,20 +510,25 @@ func (rf *Raft) sendHeartbeats() {
 				reply := &AppendEntriesReply{}
 
 				if rf.sendAppendEntries(peer, args, reply) {
-					rf.mu.Lock()
-
-					if reply.Term > rf.currentTerm {
-						rf.State = FOLLOWER
-						rf.votedFor = -1 
-						rf.electionTimer = time.Now()
-						rf.currentTerm = reply.Term
-					}
-					rf.mu.Unlock()
+					rf.handleAppendEntriesReply(peer, args, reply)
 				}
 			}(i)
 		}
 
 		time.Sleep(100 * time.Millisecond)
+	}
+
+}
+
+func (rf *Raft) handleAppendEntriesReply(_ int, _ *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.currentTerm {
+		rf.State = FOLLOWER
+		rf.votedFor = -1 
+		rf.electionTimer = time.Now()
+		rf.currentTerm = reply.Term
 	}
 
 }
