@@ -9,7 +9,6 @@ package raft
 import (
 	//	"bytes"
 	"math/rand"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -406,6 +405,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimer = time.Now()
 
 	reply.Term = rf.currentTerm
+
+	reply.Success = false
+
 	if args.PrevLogIndex >= len(rf.log) {
 		return
 	}
@@ -413,7 +415,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// NOTE: 2. Reply false if log doesn’t
 	// contain an entry at prevLogIndex whose term 
 	// matches prevLogTerm(§5.3)
-	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.Term {
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		return
 	}
 	
@@ -422,17 +424,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// delete the existing entry and all that follow it(§5.3)
 	logIndex := args.PrevLogIndex + 1
 	for i, entry := range args.Entries {
-		if logIndex + i < len(rf.log) {
-			if rf.log[logIndex + i].Term != entry.Term {
-				rf.log = rf.log[:logIndex+1]
-				rf.log = append(rf.log, args.Entries[i:]...)
-				break
-			} else {
-				// NOTE: 4. Append any new entries not already in the log
-				rf.log = append(rf.log, args.Entries[i:]...)
-				break
-			}
-
+		if logIndex+i >= len(rf.log) {
+        	rf.log = append(rf.log, args.Entries[i:]...)
+			break
+		}
+		if rf.log[logIndex + i].Term != entry.Term {
+			rf.log = rf.log[:logIndex+i]
+			rf.log = append(rf.log, args.Entries[i:]...)
+			break
 		}
 	}
 
@@ -494,23 +493,28 @@ func (rf *Raft) sendHeartbeats() {
 					return
 				}
 
-				prevLogIndex := len(rf.log) - 1
+				prevLogIndex := rf.nextIndex[peer] - 1
 				prevLogTerm := rf.log[prevLogIndex].Term
+
+				// Send entries from nextIndex onward
+				entries := make([]LogEntry, len(rf.log[rf.nextIndex[peer]:]))
+				copy(entries, rf.log[rf.nextIndex[peer]:])
 
 				args := &AppendEntriesArgs{
 					Term: currentTerm,
 					LeaderID: rf.me,
 					PrevLogIndex: prevLogIndex,
 					PrevLogTerm: prevLogTerm,
-					Entries: []LogEntry{},
+					Entries: entries,
 					LeaderCommit: commitIndex,
 				}
+
 				rf.mu.Unlock()
 
 				reply := &AppendEntriesReply{}
 
 				if rf.sendAppendEntries(peer, args, reply) {
-					rf.handleAppendEntriesReply(peer, args, reply)
+					rf.handleAppendEntriesReply(peer, args, reply, currentTerm)
 				}
 			}(i)
 		}
@@ -520,15 +524,78 @@ func (rf *Raft) sendHeartbeats() {
 
 }
 
-func (rf *Raft) handleAppendEntriesReply(_ int, _ *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply, sentTerm int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	
+	if rf.State != LEADER || rf.currentTerm != sentTerm {
+		return
+	} 
 
 	if reply.Term > rf.currentTerm {
 		rf.State = FOLLOWER
 		rf.votedFor = -1 
 		rf.electionTimer = time.Now()
 		rf.currentTerm = reply.Term
+	}
+
+	if reply.Success {
+		newMatchIndex := args.PrevLogIndex + len(args.Entries)
+		rf.matchIndex[peer] = newMatchIndex
+		rf.nextIndex[peer] = newMatchIndex + 1
+		
+		rf.updateCommitIndex()
+
+	} else {
+		if rf.nextIndex[peer] > 1 {
+			rf.nextIndex[peer]--
+		}
+	}
+
+}
+
+func (rf *Raft) updateCommitIndex() {
+	for n := len(rf.log) - 1; n > rf.commitIndex ; n-- {
+		if rf.log[n].Term != rf.currentTerm {
+			continue
+		}
+
+		count := 1 
+		for peer := range rf.peers {
+			if peer != rf.me && rf.matchIndex[peer] >= n {
+				count++
+			}
+		}
+
+		// commit if more than half commit 
+		if count * 2 > len(rf.peers) {
+			rf.commitIndex = n
+			break
+		}
+	}  
+
+}
+
+
+func (rf *Raft) applier(applyCh chan <- raftapi.ApplyMsg) {
+	for !rf.killed() {
+		rf.mu.Lock()
+
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied ++ 
+			msg := raftapi.ApplyMsg{
+				CommandValid: true,
+				Command: rf.log[rf.lastApplied].Command,
+				CommandIndex: rf.lastApplied,
+			}
+
+			rf.mu.Unlock()
+			applyCh <- msg
+			rf.mu.Lock()
+		}
+
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 
 }
@@ -567,6 +634,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applier(applyCh)
 
 
 	return rf
