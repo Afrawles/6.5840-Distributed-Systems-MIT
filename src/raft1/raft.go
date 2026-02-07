@@ -7,13 +7,15 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
+	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -86,12 +88,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftState := w.Bytes()
-	// rf.persister.Save(raftState, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 
@@ -102,17 +105,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int 
+	var votedFor int
+	var log []LogEntry
+	
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		fmt.Fprintf(os.Stderr,"Peer #%d failed to Decode persit", rf.me)
+		return
+	 } else {
+	   rf.currentTerm = currentTerm
+	   rf.votedFor = votedFor
+		rf.log = log
+	 }
 }
 
 // how many bytes in Raft's persisted log?
@@ -162,6 +169,11 @@ type AppendEntriesArgs struct {
  type AppendEntriesReply struct {
 	Term int
 	Success bool
+
+	// For fast backup
+    XTerm   int  // term of conflicting entry (if any)
+    XIndex  int  // index of first entry with XTerm
+    XLen    int  // log length
 }
 
 // LastLogTermAndIndex helps get last log Term and idnex 
@@ -192,6 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm=args.Term
 		rf.votedFor = -1 
 		rf.State = FOLLOWER
+		rf.persist()
 	}
 
 	LastLogTerm, LastLogIndex := rf.LastLogTermAndIndex()
@@ -200,6 +213,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		rf.electionTimer = time.Now()
+		rf.persist()
 	}
 
 	reply.Term = rf.currentTerm
@@ -274,6 +288,7 @@ func (rf *Raft) Start(Command interface{}) (int, int, bool) {
 	isLeader = true
 
 	rf.log = append(rf.log, newEntry)
+	rf.persist()
 
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
@@ -333,6 +348,9 @@ func (rf *Raft) startElection() {
 	rf.State = CANDIDATE
 	rf.currentTerm++
 	rf.votedFor =  rf.me
+
+	rf.persist()
+
 	rf.electionTimer = time.Now()
 	currentTerm := rf.currentTerm
 	LastLogTerm, lastLogIdx := rf.LastLogTermAndIndex()
@@ -399,6 +417,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1 
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	rf.State = FOLLOWER
@@ -409,6 +428,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = false
 
 	if args.PrevLogIndex >= len(rf.log) {
+		reply.XLen = len(rf.log)
+		reply.XTerm = -1
+		reply.XIndex = -1
 		return
 	}
 
@@ -416,6 +438,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// contain an entry at prevLogIndex whose term 
 	// matches prevLogTerm(§5.3)
 	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+
+		reply.XIndex = args.PrevLogIndex
+		for reply.XIndex > 0 && rf.log[reply.XIndex-1].Term == reply.XTerm {
+			reply.XIndex--
+		}
+		reply.XLen = len(rf.log)
+
 		return
 	}
 	
@@ -426,11 +456,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range args.Entries {
 		if logIndex+i >= len(rf.log) {
         	rf.log = append(rf.log, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 		if rf.log[logIndex + i].Term != entry.Term {
 			rf.log = rf.log[:logIndex+i]
 			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -547,8 +579,34 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 		rf.updateCommitIndex()
 
 	} else {
-		if rf.nextIndex[peer] > 1 {
-			rf.nextIndex[peer]--
+		// if rf.nextIndex[peer] > 1 {
+		// 	rf.nextIndex[peer]--
+		// }
+		//
+		if reply.XTerm == -1 {
+			// Case 3: Follower's log is too short
+			rf.nextIndex[peer] = reply.XLen
+		} else {
+			lastIndexWithXTerm := -1
+			for i := args.PrevLogIndex; i > 0; i-- {
+				if rf.log[i].Term == reply.XTerm {
+					lastIndexWithXTerm = i
+					break
+				}
+				if rf.log[i].Term < reply.XTerm {
+					break
+				}
+			}
+			
+			if lastIndexWithXTerm != -1 {
+				rf.nextIndex[peer] = lastIndexWithXTerm + 1
+			} else {
+				rf.nextIndex[peer] = reply.XIndex
+			}
+		}
+		
+		if rf.nextIndex[peer] < 1 {
+			rf.nextIndex[peer] = 1
 		}
 	}
 
